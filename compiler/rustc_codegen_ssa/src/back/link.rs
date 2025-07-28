@@ -845,6 +845,31 @@ fn link_natively(
             continue;
         }
 
+        // Check to see if the link failed with an error message that indicates it
+        // doesn't recognize the -oso_prefix option. If so, re-perform the link
+        // step without it. This is the best effort we could make to sanitize
+        // the artifacts. However, -oso_prefix was introduced in Xcode 11.
+        // That means the flag is available only on macOS Catalina 10.15 or
+        // later, whereas the minimal supported macOS version is "Sierra+ 10.12+".
+        // We might want to drop this when the minimal supported macOS version
+        // becomes 10.14, but actually no harm if we keep this longer.
+        if matches!(flavor, LinkerFlavor::Darwin(..))
+            && sess.target.is_like_darwin
+            && unknown_arg_regex.is_match(&out)
+            && out.contains("-oso_prefix")
+            && cmd.get_args().iter().any(|e| e == "-oso_prefix")
+        {
+            info!("linker output: {:?}", out);
+            warn!("Linker does not support -oso_prefix command line option. Retrying without.");
+            for arg in cmd.take_args() {
+                if arg != "-oso_prefix" {
+                    cmd.arg(arg);
+                }
+            }
+            info!("{cmd:?}");
+            continue;
+        }
+
         break;
     }
 
@@ -2456,7 +2481,7 @@ fn add_order_independent_options(
     // Take care of the flavors and CLI options requesting the `lld` linker.
     add_lld_args(cmd, sess, flavor, self_contained_components);
 
-    add_apple_link_args(cmd, sess, flavor);
+    add_apple_link_args(cmd, sess, flavor, out_filename);
 
     let apple_sdk_root = add_apple_sdk(cmd, sess, flavor);
 
@@ -3028,7 +3053,18 @@ pub(crate) fn are_upstream_rust_objects_already_included(sess: &Session) -> bool
 /// - The environment / ABI.
 /// - The deployment target.
 /// - The SDK version.
-fn add_apple_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
+///
+/// In addition, `-oso_prefix` is added for sanitizing OSO stabs in artifacts.
+/// See also:
+///
+/// * <https://github.com/rust-lang/rust/issues/116948#issuecomment-1793617018>
+/// * <https://github.com/rust-lang/rust/issues/142917#issuecomment-3013668419>
+fn add_apple_link_args(
+    cmd: &mut dyn Linker,
+    sess: &Session,
+    flavor: LinkerFlavor,
+    out_filename: &Path,
+) {
     if !sess.target.is_like_darwin {
         return;
     }
@@ -3182,6 +3218,11 @@ fn add_apple_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavo
             cmd.cc_args(&["-target", &versioned_llvm_target(sess)]);
         }
     }
+
+    let mut basepath = out_filename.to_path_buf();
+    basepath.set_file_name("");
+    cmd.link_arg("-oso_prefix");
+    cmd.link_arg(&basepath);
 }
 
 fn add_apple_sdk(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) -> Option<PathBuf> {
